@@ -43,7 +43,7 @@ def download_data(url: str) -> bytes:
     try:
         with urllib.request.urlopen(url) as resp:
             raw: bytes = resp.read()
-            return base64.b64decode(raw)
+            return base64.b64decode(raw.strip())
     except urllib.error.HTTPError as e:
         if e.code == 404:
             msg = "no data found at remote (404)"
