@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from transfer.config import (
+    CONFIG_DIR,
     ReceiverConfig,
     SenderConfig,
     load_receiver_config,
@@ -15,8 +16,8 @@ from transfer.config import (
 from transfer.crypto import decode_key, encode_key, encrypt, decrypt, generate_keypair
 from transfer.transport import delete_branch, download_data, push_data
 
-_DEFAULT_SENDER_CONFIG = "sender.toml"
-_DEFAULT_RECEIVER_CONFIG = "receiver.toml"
+_DEFAULT_SENDER_CONFIG = str(CONFIG_DIR / "sender.toml")
+_DEFAULT_RECEIVER_CONFIG = str(CONFIG_DIR / "receiver.toml")
 
 
 @click.group()
