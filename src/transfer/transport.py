@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import subprocess
 import tempfile
 import urllib.error
@@ -12,7 +13,7 @@ _DATA_FILENAME = "data"
 def push_data(encrypted: bytes, repo: str, branch: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        (tmp_path / _DATA_FILENAME).write_bytes(encrypted)
+        (tmp_path / _DATA_FILENAME).write_text(base64.b64encode(encrypted).decode("ascii"))
         _git(tmp, "init", "-b", "main")
         _git(tmp, "add", _DATA_FILENAME)
         _git(
@@ -41,8 +42,8 @@ def delete_branch(repo: str, branch: str) -> None:
 def download_data(url: str) -> bytes:
     try:
         with urllib.request.urlopen(url) as resp:
-            result: bytes = resp.read()
-            return result
+            raw: bytes = resp.read()
+            return base64.b64decode(raw.strip())
     except urllib.error.HTTPError as e:
         if e.code == 404:
             msg = "no data found at remote (404)"

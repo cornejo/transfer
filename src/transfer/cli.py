@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import click
 
 from transfer.config import (
+    CONFIG_DIR,
     ReceiverConfig,
     SenderConfig,
     load_receiver_config,
@@ -15,8 +17,8 @@ from transfer.config import (
 from transfer.crypto import decode_key, encode_key, encrypt, decrypt, generate_keypair
 from transfer.transport import delete_branch, download_data, push_data
 
-_DEFAULT_SENDER_CONFIG = "sender.toml"
-_DEFAULT_RECEIVER_CONFIG = "receiver.toml"
+_DEFAULT_SENDER_CONFIG = str(CONFIG_DIR / "sender.toml")
+_DEFAULT_RECEIVER_CONFIG = str(CONFIG_DIR / "receiver.toml")
 
 
 @click.group()
@@ -66,16 +68,40 @@ def send(file: str, config_path: str) -> None:
     click.echo("Pushed to remote.")
 
 
+def _hash_file_for_config(config_path: Path) -> Path:
+    return config_path.with_suffix(".sha256")
+
+
 @main.command()
 @click.argument("output")
 @click.option("--config", "config_path", default=_DEFAULT_RECEIVER_CONFIG)
-def receive(output: str, config_path: str) -> None:
-    config = load_receiver_config(Path(config_path))
+@click.option("--redownload", is_flag=True, help="Re-download a previously seen file.")
+def receive(output: str, config_path: str, *, redownload: bool) -> None:
+    cfg_path = Path(config_path)
+    config = load_receiver_config(cfg_path)
     click.echo("Downloading...")
     encrypted = download_data(config.url)
+    new_hash = hashlib.sha256(encrypted).hexdigest()
+    hash_path = _hash_file_for_config(cfg_path)
+    prev_hash = hash_path.read_text().strip() if hash_path.exists() else None
+
+    if redownload:
+        if prev_hash is not None and new_hash != prev_hash:
+            raise click.ClickException(
+                "remote data has changed since last download; "
+                "run without --redownload to receive the new file"
+            )
+    else:
+        if prev_hash is not None and new_hash == prev_hash:
+            raise click.ClickException(
+                "remote data has not changed since last download; "
+                "use --redownload to download it again"
+            )
+
     private_key = decode_key(config.private_key)
     plaintext = decrypt(encrypted, private_key)
     Path(output).write_bytes(plaintext)
+    hash_path.write_text(new_hash + "\n")
     click.echo(f"Decrypted {len(plaintext)} bytes -> {output}")
 
 

@@ -4,6 +4,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+CONFIG_DIR = Path.home() / ".config" / "transfer"
+
 
 @dataclass(frozen=True)
 class SenderConfig:
@@ -46,6 +48,7 @@ def load_receiver_config(path: Path) -> ReceiverConfig:
 
 
 def save_sender_config(config: SenderConfig, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f'public_key = "{config.public_key}"',
         f'repo = "{config.repo}"',
@@ -56,6 +59,7 @@ def save_sender_config(config: SenderConfig, path: Path) -> None:
 
 
 def save_receiver_config(config: ReceiverConfig, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f'private_key = "{config.private_key}"',
         f'url = "{config.url}"',
