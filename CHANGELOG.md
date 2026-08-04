@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-08-04
+
+### Added
+
+- README with usage documentation
+- GitLab CI publish stage to push Python package to GitLab registry on tagged releases
+
 ## 0.2.0 - 2026-07-13
 
 ### Added

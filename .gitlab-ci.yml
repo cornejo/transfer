@@ -1,5 +1,6 @@
 stages:
   - check
+  - publish
 
 check:
   stage: check
@@ -10,3 +11,24 @@ check:
   script:
     - uv run pyright
     - uv run pytest
+
+publish:
+  stage: publish
+  image: python:3.12.3
+  rules:
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - pip install uv build
+  script:
+    - python -m build
+    - >-
+      uv pip install
+      --index-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi/simple
+      --extra-index-url https://pypi.org/simple
+      twine
+    - >-
+      TWINE_USERNAME=gitlab-ci-token
+      TWINE_PASSWORD=${CI_JOB_TOKEN}
+      twine upload
+      --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
+      dist/*
