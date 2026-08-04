@@ -1,0 +1,12 @@
+stages:
+  - check
+
+check:
+  stage: check
+  image: python:3.12.3
+  before_script:
+    - pip install uv
+    - uv sync --group dev
+  script:
+    - uv run pyright
+    - uv run pytest

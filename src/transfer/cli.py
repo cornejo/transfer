@@ -15,6 +15,9 @@ from transfer.config import (
     save_sender_config,
 )
 from transfer.crypto import decode_key, encode_key, encrypt, decrypt, generate_keypair
+from transfer.git import Failure
+from transfer.repo_apply import DEFAULT_BRANCH, repo_apply
+from transfer.repo_send import TAG_PATTERN, TRANSFER_COMMAND, repo_send
 from transfer.transport import delete_branch, download_data, push_data
 
 _DEFAULT_SENDER_CONFIG = str(CONFIG_DIR / "sender.toml")
@@ -111,3 +114,48 @@ def destroy(config_path: str) -> None:
     config = load_sender_config(Path(config_path))
     delete_branch(config.repo, config.branch)
     click.echo(f"Deleted remote branch '{config.branch}'.")
+
+
+@main.command("repo-send")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path("."), help="Path to the git repository.")
+@click.option("--export-dir", type=click.Path(path_type=Path), default=None, help="Directory for the exported bundle.")
+@click.option("--resync", is_flag=True, help="Send one squashed commit after a history rewrite.")
+@click.option("--tag-pattern", default=TAG_PATTERN, help="Regex for version tags to include.")
+@click.option("--no-lint", is_flag=True, help="Skip the black --check lint gate.")
+@click.option("--transfer-command", default=TRANSFER_COMMAND, help="Command to hand the archive to.")
+@click.option("--keep-export", is_flag=True, help="Leave the export directory after sending.")
+@click.option("--no-transfer", is_flag=True, help="Build the bundle without sending or moving the marker.")
+def repo_send_cmd(
+    repo: Path,
+    export_dir: Path | None,
+    resync: bool,
+    tag_pattern: str,
+    no_lint: bool,
+    transfer_command: str,
+    keep_export: bool,
+    no_transfer: bool,
+) -> None:
+    try:
+        repo_send(
+            repo=repo,
+            export_dir=export_dir,
+            resync=resync,
+            tag_pattern=tag_pattern,
+            no_lint=no_lint,
+            transfer_command=transfer_command,
+            keep_export=keep_export,
+            no_transfer=no_transfer,
+        )
+    except Failure as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("repo-apply")
+@click.argument("bundle", type=click.Path(path_type=Path))
+@click.option("--repo", type=click.Path(path_type=Path), default=Path("."), help="Path to the receiving git repository.")
+@click.option("--branch", default=DEFAULT_BRANCH, help="Branch to apply patches to.")
+def repo_apply_cmd(bundle: Path, repo: Path, branch: str) -> None:
+    try:
+        repo_apply(bundle=bundle, repo=repo, branch=branch)
+    except Failure as exc:
+        raise click.ClickException(str(exc)) from exc
