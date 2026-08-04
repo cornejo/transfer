@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2 - 2026-08-04
+
+### Changed
+
+- Package version derived from git tags via hatch-vcs
+- GitLab CI publish stage uses `uv build`/`uv publish`
+
+### Added
+
+- `.gitignore`
+
 ## 0.3.1 - 2026-08-04
 
 ### Added

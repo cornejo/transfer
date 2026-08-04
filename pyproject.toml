@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "transfer"
-version = "0.3.1"
+dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
@@ -13,6 +13,12 @@ dependencies = [
 
 [project.scripts]
 transfer = "transfer.cli:main"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/transfer/_version.py"
 
 [dependency-groups]
 dev = ["pytest", "pyright"]
