@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import click
@@ -9,16 +8,15 @@ from transfer.config import (
     CONFIG_DIR,
     ReceiverConfig,
     SenderConfig,
-    load_receiver_config,
-    load_sender_config,
     save_receiver_config,
     save_sender_config,
 )
-from transfer.crypto import decode_key, encode_key, encrypt, decrypt, generate_keypair
+from transfer.crypto import decode_key, encode_key, generate_keypair
+from transfer.exchange import receive_payload, send_payload, sender_config
 from transfer.git import Failure
 from transfer.repo_apply import DEFAULT_BRANCH, repo_apply
-from transfer.repo_send import TAG_PATTERN, TRANSFER_COMMAND, repo_send
-from transfer.transport import delete_branch, download_data, push_data
+from transfer.repo_send import TAG_PATTERN, repo_send
+from transfer.transport import delete_branch
 
 _DEFAULT_SENDER_CONFIG = str(CONFIG_DIR / "sender.toml")
 _DEFAULT_RECEIVER_CONFIG = str(CONFIG_DIR / "receiver.toml")
@@ -62,56 +60,40 @@ def send(file: str, config_path: str) -> None:
     file_path = Path(file)
     if not file_path.is_file():
         raise click.ClickException(f"file not found: {file}")
-    config = load_sender_config(Path(config_path))
     plaintext = file_path.read_bytes()
-    recipient_key = decode_key(config.public_key)
-    encrypted = encrypt(plaintext, recipient_key)
-    click.echo(f"Encrypted {len(plaintext)} bytes -> {len(encrypted)} bytes")
-    push_data(encrypted, config.repo, config.branch)
+    try:
+        payload = send_payload(plaintext, Path(config_path))
+    except Failure as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Encrypted {len(plaintext)} bytes -> {len(payload.encrypted)} bytes")
     click.echo("Pushed to remote.")
-
-
-def _hash_file_for_config(config_path: Path) -> Path:
-    return config_path.with_suffix(".sha256")
 
 
 @main.command()
 @click.argument("output")
 @click.option("--config", "config_path", default=_DEFAULT_RECEIVER_CONFIG)
-@click.option("--redownload", is_flag=True, help="Re-download a previously seen file.")
-def receive(output: str, config_path: str, *, redownload: bool) -> None:
-    cfg_path = Path(config_path)
-    config = load_receiver_config(cfg_path)
-    click.echo("Downloading...")
-    encrypted = download_data(config.url)
-    new_hash = hashlib.sha256(encrypted).hexdigest()
-    hash_path = _hash_file_for_config(cfg_path)
-    prev_hash = hash_path.read_text().strip() if hash_path.exists() else None
-
-    if redownload:
-        if prev_hash is not None and new_hash != prev_hash:
-            raise click.ClickException(
-                "remote data has changed since last download; "
-                "run without --redownload to receive the new file"
-            )
-    else:
-        if prev_hash is not None and new_hash == prev_hash:
-            raise click.ClickException(
-                "remote data has not changed since last download; "
-                "use --redownload to download it again"
-            )
-
-    private_key = decode_key(config.private_key)
-    plaintext = decrypt(encrypted, private_key)
-    Path(output).write_bytes(plaintext)
-    hash_path.write_text(new_hash + "\n")
-    click.echo(f"Decrypted {len(plaintext)} bytes -> {output}")
+@click.option(
+    "--source",
+    default=None,
+    help="URL or file path to read the data from, instead of the configured URL.",
+)
+def receive(output: str, config_path: str, source: str | None) -> None:
+    click.echo(f"Reading from {source}..." if source else "Downloading...")
+    try:
+        payload = receive_payload(Path(config_path), source)
+    except Failure as exc:
+        raise click.ClickException(str(exc)) from exc
+    Path(output).write_bytes(payload.plaintext)
+    click.echo(f"Decrypted {len(payload.plaintext)} bytes -> {output}")
 
 
 @main.command()
 @click.option("--config", "config_path", default=_DEFAULT_SENDER_CONFIG)
 def destroy(config_path: str) -> None:
-    config = load_sender_config(Path(config_path))
+    try:
+        config = sender_config(Path(config_path))
+    except Failure as exc:
+        raise click.ClickException(str(exc)) from exc
     delete_branch(config.repo, config.branch)
     click.echo(f"Deleted remote branch '{config.branch}'.")
 
@@ -122,7 +104,7 @@ def destroy(config_path: str) -> None:
 @click.option("--resync", is_flag=True, help="Send one squashed commit after a history rewrite.")
 @click.option("--tag-pattern", default=TAG_PATTERN, help="Regex for version tags to include.")
 @click.option("--no-lint", is_flag=True, help="Skip the black --check lint gate.")
-@click.option("--transfer-command", default=TRANSFER_COMMAND, help="Command to hand the archive to.")
+@click.option("--config", "config_path", default=_DEFAULT_SENDER_CONFIG)
 @click.option("--keep-export", is_flag=True, help="Leave the export directory after sending.")
 @click.option("--no-transfer", is_flag=True, help="Build the bundle without sending or moving the marker.")
 def repo_send_cmd(
@@ -131,10 +113,11 @@ def repo_send_cmd(
     resync: bool,
     tag_pattern: str,
     no_lint: bool,
-    transfer_command: str,
+    config_path: str,
     keep_export: bool,
     no_transfer: bool,
 ) -> None:
+    """Export new commits and send them with `send`."""
     try:
         repo_send(
             repo=repo,
@@ -142,7 +125,7 @@ def repo_send_cmd(
             resync=resync,
             tag_pattern=tag_pattern,
             no_lint=no_lint,
-            transfer_command=transfer_command,
+            config_path=Path(config_path),
             keep_export=keep_export,
             no_transfer=no_transfer,
         )
@@ -151,11 +134,22 @@ def repo_send_cmd(
 
 
 @main.command("repo-apply")
-@click.argument("bundle", type=click.Path(path_type=Path))
 @click.option("--repo", type=click.Path(path_type=Path), default=Path("."), help="Path to the receiving git repository.")
 @click.option("--branch", default=DEFAULT_BRANCH, help="Branch to apply patches to.")
-def repo_apply_cmd(bundle: Path, repo: Path, branch: str) -> None:
+@click.option("--config", "config_path", default=_DEFAULT_RECEIVER_CONFIG)
+@click.option(
+    "--source",
+    default=None,
+    help="URL or file path to receive from, instead of the configured URL.",
+)
+def repo_apply_cmd(repo: Path, branch: str, config_path: str, source: str | None) -> None:
+    """Receive a diode bundle with `receive` and apply it."""
     try:
-        repo_apply(bundle=bundle, repo=repo, branch=branch)
+        repo_apply(
+            repo=repo,
+            branch=branch,
+            config_path=Path(config_path),
+            source=source,
+        )
     except Failure as exc:
         raise click.ClickException(str(exc)) from exc

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,7 +83,7 @@ class TestSend:
         file_path.write_text("secret data")
 
         runner = CliRunner()
-        with patch("transfer.cli.push_data") as mock_push:
+        with patch("transfer.exchange.push_data") as mock_push:
             result = runner.invoke(
                 main, ["send", str(file_path), "--config", str(config_path)]
             )
@@ -106,7 +107,7 @@ class TestReceive:
         output_path = tmp_path / "output.txt"
 
         runner = CliRunner()
-        with patch("transfer.cli.download_data", return_value=encrypted):
+        with patch("transfer.exchange.download_data", return_value=encrypted):
             result = runner.invoke(
                 main,
                 ["receive", str(output_path), "--config", str(config_path)],
@@ -114,81 +115,66 @@ class TestReceive:
         assert result.exit_code == 0
         assert output_path.read_bytes() == plaintext
 
-    def test_detects_duplicate_download(self, tmp_path: Path) -> None:
-        private, public = generate_keypair()
-        encrypted = encrypt(b"data", public)
 
+class TestReceiveSourceOverride:
+    def _config(self, tmp_path: Path, private: bytes) -> Path:
         config_path = tmp_path / "receiver.toml"
         config_path.write_text(
             f'private_key = "{encode_key(private)}"\n'
-            f'url = "https://example.com/data"\n'
+            f'url = "https://unavailable.example.com/data"\n'
         )
-        output_path = tmp_path / "output.txt"
+        return config_path
 
-        runner = CliRunner()
-        with patch("transfer.cli.download_data", return_value=encrypted):
-            result = runner.invoke(
-                main,
-                ["receive", str(output_path), "--config", str(config_path)],
-            )
-            assert result.exit_code == 0
-
-            result2 = runner.invoke(
-                main,
-                ["receive", str(output_path), "--config", str(config_path)],
-            )
-            assert result2.exit_code != 0
-            assert "not changed" in result2.output
-
-    def test_redownload_flag(self, tmp_path: Path) -> None:
+    def test_reads_from_a_local_file(self, tmp_path: Path) -> None:
         private, public = generate_keypair()
-        encrypted = encrypt(b"data", public)
-
-        config_path = tmp_path / "receiver.toml"
-        config_path.write_text(
-            f'private_key = "{encode_key(private)}"\n'
-            f'url = "https://example.com/data"\n'
-        )
+        plaintext = b"the secret"
+        source_path = tmp_path / "data"
+        source_path.write_text(base64.b64encode(encrypt(plaintext, public)).decode("ascii"))
         output_path = tmp_path / "output.txt"
 
         runner = CliRunner()
-        with patch("transfer.cli.download_data", return_value=encrypted):
-            runner.invoke(
-                main,
-                ["receive", str(output_path), "--config", str(config_path)],
-            )
-            result = runner.invoke(
-                main,
-                ["receive", str(output_path), "--config", str(config_path), "--redownload"],
-            )
-            assert result.exit_code == 0
+        result = runner.invoke(
+            main,
+            [
+                "receive", str(output_path),
+                "--config", str(self._config(tmp_path, private)),
+                "--source", str(source_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert output_path.read_bytes() == plaintext
 
-    def test_redownload_rejects_changed_data(self, tmp_path: Path) -> None:
+    def test_reads_from_an_alternative_url(self, tmp_path: Path) -> None:
         private, public = generate_keypair()
-        encrypted1 = encrypt(b"data1", public)
-        encrypted2 = encrypt(b"data2", public)
-
-        config_path = tmp_path / "receiver.toml"
-        config_path.write_text(
-            f'private_key = "{encode_key(private)}"\n'
-            f'url = "https://example.com/data"\n'
-        )
+        encrypted = encrypt(b"the secret", public)
         output_path = tmp_path / "output.txt"
 
         runner = CliRunner()
-        with patch("transfer.cli.download_data", return_value=encrypted1):
-            runner.invoke(
-                main,
-                ["receive", str(output_path), "--config", str(config_path)],
-            )
-
-        with patch("transfer.cli.download_data", return_value=encrypted2):
+        with patch("transfer.exchange.download_data", return_value=encrypted) as mock_download:
             result = runner.invoke(
                 main,
-                ["receive", str(output_path), "--config", str(config_path), "--redownload"],
+                [
+                    "receive", str(output_path),
+                    "--config", str(self._config(tmp_path, private)),
+                    "--source", "https://mirror.example.com/data",
+                ],
             )
-            assert result.exit_code != 0
-            assert "changed" in result.output
+        assert result.exit_code == 0, result.output
+        mock_download.assert_called_once_with("https://mirror.example.com/data")
+
+    def test_reports_a_missing_source(self, tmp_path: Path) -> None:
+        private, _ = generate_keypair()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "receive", str(tmp_path / "output.txt"),
+                "--config", str(self._config(tmp_path, private)),
+                "--source", str(tmp_path / "nope"),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "could not read" in result.output
 
 
 class TestDestroy:
@@ -224,5 +210,5 @@ class TestRepoApplyHelp:
         runner = CliRunner()
         result = runner.invoke(main, ["repo-apply", "--help"])
         assert result.exit_code == 0
-        assert "BUNDLE" in result.output
+        assert "--source" in result.output
         assert "--branch" in result.output

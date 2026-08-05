@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shlex
 import shutil
 import subprocess
 import tarfile
@@ -10,6 +9,7 @@ from pathlib import Path
 
 import click
 
+from transfer.exchange import send_payload
 from transfer.git import Failure, git, git_ok, rev_parse
 
 FORMAT = 1
@@ -21,8 +21,6 @@ TAG_PATTERN = r"^v?\d+\.\d+\.\d+$"
 WIRE_AUTHOR = "author <author>"
 
 LINT_COMMAND = ["uv", "run", "--with", "black", "--no-project", "black", "--check", "."]
-
-TRANSFER_COMMAND = "transfer send"
 
 
 def lint(repo: Path) -> None:
@@ -173,14 +171,18 @@ def build_archive(export_dir: Path, archive: Path) -> None:
         tar.add(export_dir, arcname=export_dir.name)
 
 
-def run_transfer(archive: Path, repo: Path, command: str) -> None:
-    argv = shlex.split(command)
-    result = subprocess.run([*argv, str(archive)], cwd=repo)
-    if result.returncode != 0:
+def transfer_archive(archive: Path, config_path: Path) -> None:
+    """Hand the bundle to the encrypted transport, exactly as `transfer send` would."""
+    try:
+        payload = send_payload(archive.read_bytes(), config_path)
+    except (Failure, OSError) as exc:
         raise Failure(
-            f"{command} exited {result.returncode}. "
+            f"sending the bundle failed: {exc}\n"
             f"{SENT_REF} has not been moved, so re-running will resend the same commits."
-        )
+        ) from exc
+    click.echo(
+        f"Encrypted {archive.stat().st_size} bytes -> {len(payload.encrypted)} bytes"
+    )
 
 
 def repo_send(
@@ -190,7 +192,7 @@ def repo_send(
     resync: bool,
     tag_pattern: str,
     no_lint: bool,
-    transfer_command: str,
+    config_path: Path,
     keep_export: bool,
     no_transfer: bool,
 ) -> None:
@@ -237,7 +239,7 @@ def repo_send(
         return
 
     build_archive(resolved_export_dir, archive)
-    run_transfer(archive, repo, transfer_command)
+    transfer_archive(archive, config_path)
 
     git("update-ref", SENT_REF, head, repo=repo)
     click.echo(f"Sent. {SENT_REF} now at {head[:12]}")

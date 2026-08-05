@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from transfer.exchange import DEFAULT_RECEIVER_CONFIG, receive_payload
 from transfer.git import Failure, git, git_ok, rev_parse
 
 SUPPORTED_FORMATS = {1}
@@ -202,6 +203,20 @@ def move_base(repo: Path, head_upstream: str, previous: str, commit: str) -> Non
         git_ok("tag", "-d", f"{BASE_PREFIX}{previous}", repo=repo, env=env)
 
 
+def receive_bundle(
+    config_path: Path, source: str | None, stack: list[tempfile.TemporaryDirectory[str]]
+) -> Path:
+    """Receive the bundle over the encrypted transport, as `transfer receive` would."""
+    click.echo(f"Receiving from {source}..." if source else "Receiving...")
+    payload = receive_payload(config_path, source)
+    holder = tempfile.TemporaryDirectory()
+    stack.append(holder)
+    dest = Path(holder.name) / "bundle.tar"
+    dest.write_bytes(payload.plaintext)
+    click.echo(f"Received {len(payload.plaintext)} bytes")
+    return dest
+
+
 def resolve_bundle(path: Path, stack: list[tempfile.TemporaryDirectory[str]]) -> Path:
     if path.is_dir():
         return path
@@ -222,9 +237,10 @@ def resolve_bundle(path: Path, stack: list[tempfile.TemporaryDirectory[str]]) ->
 
 def repo_apply(
     *,
-    bundle: Path,
     repo: Path,
     branch: str,
+    config_path: Path = DEFAULT_RECEIVER_CONFIG,
+    source: str | None = None,
 ) -> None:
     repo = repo.resolve()
     holders: list[tempfile.TemporaryDirectory[str]] = []
@@ -234,7 +250,8 @@ def repo_apply(
         if not git_ok("rev-parse", "--is-inside-work-tree", repo=repo, env=env):
             raise Failure(f"{repo} is not a git repository")
 
-        resolved_bundle = resolve_bundle(bundle.resolve(), holders)
+        received = receive_bundle(config_path, source, holders)
+        resolved_bundle = resolve_bundle(received, holders)
         manifest = read_manifest(resolved_bundle / "manifest")
         mode = manifest["MODE"]
         base = manifest.get("BASE", "")

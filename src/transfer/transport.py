@@ -4,10 +4,13 @@ import base64
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 _DATA_FILENAME = "data"
+
+_URL_SCHEMES = {"http", "https", "file", "ftp"}
 
 
 def push_data(encrypted: bytes, repo: str, branch: str) -> None:
@@ -39,16 +42,33 @@ def delete_branch(repo: str, branch: str) -> None:
         )
 
 
-def download_data(url: str) -> bytes:
-    try:
-        with urllib.request.urlopen(url) as resp:
-            raw: bytes = resp.read()
-            return base64.b64decode(raw.strip())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            msg = "no data found at remote (404)"
-            raise FileNotFoundError(msg) from e
-        raise
+def is_url(source: str) -> bool:
+    """True if `source` names a URL rather than a filesystem path."""
+    return urllib.parse.urlsplit(source).scheme in _URL_SCHEMES
+
+
+def read_source(source: str) -> bytes:
+    """Read the raw bytes of `source`, which may be a URL or a local path."""
+    if is_url(source):
+        try:
+            with urllib.request.urlopen(source) as resp:
+                raw: bytes = resp.read()
+                return raw
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                msg = f"no data found at {source} (404)"
+                raise FileNotFoundError(msg) from e
+            raise
+
+    path = Path(source).expanduser()
+    if not path.is_file():
+        msg = f"no data found at {source}"
+        raise FileNotFoundError(msg)
+    return path.read_bytes()
+
+
+def download_data(source: str) -> bytes:
+    return base64.b64decode(read_source(source).strip())
 
 
 def _git(cwd: str, *args: str) -> None:

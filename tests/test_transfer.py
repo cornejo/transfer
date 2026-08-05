@@ -5,14 +5,16 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from conftest import Repo, init_repo
+from conftest import Hub, Repo, init_repo
 
 
 def transfer(source: Repo, target: Repo, *send_args: str) -> None:
     """The happy path, asserted, so tests can use it as a setup step."""
     sent = source.send(*send_args)
     assert sent.code == 0, sent.text
-    applied = target.apply(source.bundle)
+    assert source.hub is not None
+    source.hub.serve()
+    applied = target.apply()
     assert applied.code == 0, applied.text
 
 
@@ -35,7 +37,8 @@ class TestFullHistory:
         # A second full bundle, as if the sender had lost its state.
         source.git("update-ref", "-d", "refs/diode/sent")
         assert source.send().code == 0
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert "already exists" in result.text
@@ -78,7 +81,8 @@ class TestIncremental:
         source.commit("four")
         assert source.send().code == 0
 
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert "does not exist" in result.text
@@ -95,15 +99,18 @@ class TestIncremental:
 
         source.commit("five")
         assert source.send().code == 0
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert "never seen" in result.text
         assert target.subjects("upstream") == ["one", "two", "three"]
 
         # And it applies once the skipped bundle is put back in order.
-        assert target.apply(skipped).code == 0
-        assert target.apply(source.bundle).code == 0
+        source.resend(skipped)
+        assert target.apply().code == 0
+        source.resend()
+        assert target.apply().code == 0
         assert target.subjects("upstream")[-2:] == ["four", "five"]
 
     def test_it_refuses_when_the_branch_has_moved_underneath_it(
@@ -117,7 +124,8 @@ class TestIncremental:
 
         source.commit("four")
         assert source.send().code == 0
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert "reserved for transferred commits" in result.text
@@ -219,7 +227,8 @@ class TestTags:
         assert source.send().code == 0
         (source.bundle / "tags.txt").write_text("9.9.9/1 1\n")
 
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 0
         assert "could not place tag" in result.text
@@ -282,7 +291,8 @@ class TestRewrittenHistory:
         assert result.text.count("Mode: resync") == 1
         assert len(list((source.bundle / "patches").glob("*.patch"))) == 1
 
-        assert target.apply(source.bundle).code == 0
+        source.resend()
+        assert target.apply().code == 0
         # The far side keeps its history and gains one commit whose tree
         # matches the rewritten source exactly.
         assert target.subjects("upstream")[:3] == ["one", "two", "three"]
@@ -349,7 +359,8 @@ class TestAtomicity:
         )
 
         before = target.ref("upstream")
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert target.ref("upstream") == before
@@ -365,7 +376,8 @@ class TestAtomicity:
             "From x\nFrom: a <a>\nSubject: [PATCH] junk\n\nnot a patch\n"
         )
 
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert target.ref("refs/heads/upstream") is None
@@ -378,7 +390,8 @@ class TestAtomicity:
         assert source.send().code == 0
         (target.path / "scratch.txt").write_text("work in progress")
 
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert "uncommitted changes" in result.text
@@ -395,7 +408,8 @@ class TestBundleHandling:
             ["tar", "cf", str(archive), "-C", str(source.path), "export"], check=True
         )
 
-        assert target.apply(archive).code == 0
+        source.resend(archive)
+        assert target.apply().code == 0
         assert target.subjects("upstream") == ["one", "two", "three"]
 
     def test_it_refuses_a_bundle_from_a_newer_sender(
@@ -405,22 +419,24 @@ class TestBundleHandling:
         manifest = source.bundle / "manifest"
         manifest.write_text(manifest.read_text().replace("FORMAT=1", "FORMAT=99"))
 
-        result = target.apply(source.bundle)
+        source.resend()
+        result = target.apply()
 
         assert result.code == 1
         assert "not supported" in result.text
         assert target.ref("refs/heads/upstream") is None
 
     def test_it_refuses_something_that_is_not_a_bundle(
-        self, target: Repo, tmp_path: Path
+        self, source: Repo, target: Repo, tmp_path: Path
     ) -> None:
         empty = tmp_path / "nothing"
         empty.mkdir()
+        source.resend(empty)
 
-        result = target.apply(empty)
+        result = target.apply()
 
         assert result.code == 1
-        assert "no manifest" in result.text
+        assert "does not look like a diode bundle" in result.text
 
 
 class TestSendPreconditions:
@@ -432,10 +448,14 @@ class TestSendPreconditions:
         assert result.code == 1
         assert "no commits" in result.text
 
-    def test_the_marker_only_moves_once_the_bytes_are_away(self, source: Repo) -> None:
+    def test_the_marker_only_moves_once_the_bytes_are_away(
+        self, source: Repo, hub: Hub
+    ) -> None:
         # A failed transfer must leave the marker alone, so the next run
         # resends these commits rather than skipping past them.
-        result = source.send("--transfer-command", "false")
+        hub.break_remote()
+
+        result = source.send()
 
         assert result.code == 1
         assert "resend the same commits" in result.text
@@ -444,3 +464,92 @@ class TestSendPreconditions:
     def test_the_marker_moves_after_a_successful_transfer(self, source: Repo) -> None:
         assert source.send().code == 0
         assert source.ref("refs/diode/sent") == source.head
+
+
+class TestBundleLocation:
+    """repo-apply gets its bundle the same way `receive` gets any other file."""
+
+    def test_it_receives_the_bundle_over_the_transport(
+        self, source: Repo, target: Repo, hub: Hub
+    ) -> None:
+        assert source.send().code == 0
+        hub.serve()
+
+        result = target.apply()
+
+        assert result.code == 0, result.text
+        assert target.subjects("upstream") == ["one", "two", "three"]
+
+    def test_it_receives_from_a_source_override(
+        self, source: Repo, target: Repo, hub: Hub, tmp_path: Path
+    ) -> None:
+        assert source.send().code == 0
+        mirror = tmp_path / "mirror-data"
+        mirror.write_text(hub.serve().read_text())
+        hub.published.unlink()  # the usual location is unavailable
+
+        result = target.apply("--source", str(mirror))
+
+        assert result.code == 0, result.text
+        assert target.subjects("upstream") == ["one", "two", "three"]
+
+    def test_it_reports_a_source_it_cannot_read(
+        self, target: Repo, tmp_path: Path
+    ) -> None:
+        result = target.apply("--source", str(tmp_path / "gone"))
+
+        assert result.code == 1
+        assert "could not read" in result.text
+        assert target.ref("refs/heads/upstream") is None
+
+
+class TestDoubleApply:
+    """Receiving is repeatable, so applying twice must be refused on this side."""
+
+    def seed(self, source: Repo, target: Repo, hub: Hub) -> None:
+        assert source.send().code == 0
+        hub.serve()
+        assert target.apply().code == 0
+
+    def test_it_refuses_the_same_full_bundle_twice(
+        self, source: Repo, target: Repo, hub: Hub
+    ) -> None:
+        self.seed(source, target, hub)
+
+        result = target.apply()
+
+        assert result.code == 1
+        assert "already exists" in result.text
+        assert target.subjects("upstream") == ["one", "two", "three"]
+
+    def test_it_refuses_the_same_incremental_bundle_twice(
+        self, source: Repo, target: Repo, hub: Hub
+    ) -> None:
+        self.seed(source, target, hub)
+        source.commit("four")
+        assert source.send().code == 0
+        hub.serve()
+        assert target.apply().code == 0
+
+        result = target.apply()
+
+        assert result.code == 1
+        assert "never seen" in result.text
+        assert target.subjects("upstream") == ["one", "two", "three", "four"]
+
+    def test_it_refuses_a_repository_that_is_not_tracking_this_upstream(
+        self, source: Repo, target: Repo, hub: Hub, tmp_path: Path
+    ) -> None:
+        self.seed(source, target, hub)
+        source.commit("four")
+        assert source.send().code == 0
+        hub.serve()
+
+        stranger = init_repo(tmp_path / "stranger", hub)
+        stranger.commit("unrelated")
+
+        result = stranger.apply()
+
+        assert result.code == 1
+        assert "does not exist" in result.text
+        assert stranger.ref("refs/heads/upstream") is None
